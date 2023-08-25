@@ -2,15 +2,13 @@ const path = require("path");
 const orders = require(path.resolve("src/data/orders-data"));
 const nextId = require("../utils/nextId");
 
-function list(req, res, next) {
-  res.json({ data: orders });
-}
-
-function create(req, res, next) {
-  const { data: { deliverTo, mobileNumber, dishes } = {} } = req.body;
+// Middleware to validate order data
+function validateOrder(req, res, next) {
+  const { data: orderData } = req.body;
 
   const validStatuses = ["pending", "preparing", "out-for-delivery", "delivered"];
-  const status = "pending"; // Set default status to "pending"
+
+  const { deliverTo, mobileNumber, dishes, status } = orderData;
 
   if (!deliverTo || deliverTo === "") {
     return next({
@@ -35,14 +33,7 @@ function create(req, res, next) {
 
   for (let index = 0; index < dishes.length; index++) {
     const dish = dishes[index];
-    if (!("quantity" in dish)) {
-      return next({
-        status: 400,
-        message: `Dish ${index} must have a quantity that is an integer greater than 0`,
-      });
-    }
-
-    if (typeof dish.quantity !== "number" || dish.quantity <= 0) {
+    if (!("quantity" in dish) || typeof dish.quantity !== "number" || dish.quantity <= 0) {
       return next({
         status: 400,
         message: `Dish ${index} must have a quantity that is an integer greater than 0`,
@@ -50,36 +41,21 @@ function create(req, res, next) {
     }
   }
 
-  const newOrder = {
-    id: nextId(),
-    deliverTo,
-    mobileNumber,
-    dishes,
-    status,
-  };
-
-  orders.push(newOrder);
-  res.status(201).json({ data: newOrder });
-}
-
-
-function read(req, res, next) {
-  const { orderId } = req.params;
-  const foundOrder = orders.find((order) => order.id === orderId);
-  if (foundOrder) {
-    res.json({ data: foundOrder });
-  } else {
-    next({
-      status: 404,
-      message: `Order with id ${orderId} not found.`,
+  if (status && !validStatuses.includes(status)) {
+    return next({
+      status: 400,
+      message: "Invalid status",
     });
   }
+
+  res.locals.orderData = orderData;
+  next();
 }
 
-function update(req, res, next) {
+// Middleware to find an order by ID
+function findOrderById(req, res, next) {
   const { orderId } = req.params;
   const foundOrder = orders.find((order) => order.id === orderId);
-  const validStatuses = ["pending", "preparing", "out-for-delivery", "delivered"];
 
   if (!foundOrder) {
     return next({
@@ -88,12 +64,44 @@ function update(req, res, next) {
     });
   }
 
-  const { data: { id, status, ...order } = {} } = req.body;
+  res.locals.foundOrder = foundOrder;
+  next();
+}
 
-  if (id && id !== orderId) {
+// Handler functions
+function list(req, res, next) {
+  res.json({ data: orders });
+}
+
+function create(req, res, next) {
+  const newOrder = {
+    id: nextId(),
+    ...res.locals.orderData,
+  };
+
+  orders.push(newOrder);
+  res.status(201).json({ data: newOrder });
+}
+
+function read(req, res, next) {
+  res.json({ data: res.locals.foundOrder });
+}
+
+function update(req, res, next) {
+  const { status, ...orderData } = res.locals.orderData;
+  const foundOrder = res.locals.foundOrder;
+
+  if (!status) {
     return next({
       status: 400,
-      message: `Order id does not match route id. Order: ${id}, Route: ${orderId}.`,
+      message: "status is required in the request.",
+    });
+  }
+
+  if (req.body.data && req.body.data.id && req.body.data.id !== foundOrder.id) {
+    return next({
+      status: 400,
+      message: `Request data id (${req.body.data.id}) does not match route orderId (${foundOrder.id}).`,
     });
   }
 
@@ -103,87 +111,39 @@ function update(req, res, next) {
       message: "A delivered order cannot be changed.",
     });
   }
-  
-  if (!status || status === undefined || !validStatuses.includes(status)) {
-    return next ({
-      status: 400,
-      message: "status"
-    })
+
+  if (req.body.data) {
+    delete req.body.data.id;
+    Object.assign(foundOrder, req.body.data);
   }
 
-  if (!order.deliverTo || order.deliverTo === "") {
-    return next({
-      status: 400,
-      message: "Order must include a deliverTo",
-    });
-  }
-
-  if (!order.mobileNumber || order.mobileNumber === "") {
-    return next({
-      status: 400,
-      message: "Order must include a mobileNumber",
-    });
-  }
-
-  if (!order.dishes || !Array.isArray(order.dishes) || order.dishes.length === 0) {
-    return next({
-      status: 400,
-      message: "Order must include at least one dish",
-    });
-  }
-
-  for (let index = 0; index < order.dishes.length; index++) {
-    const dish = order.dishes[index];
-    if (!("quantity" in dish)) {
-      return next({
-        status: 400,
-        message: `Dish ${index} must have a quantity that is an integer greater than 0`,
-      });
-    }
-
-    if (typeof dish.quantity !== "number" || dish.quantity <= 0) {
-      return next({
-        status: 400,
-        message: `Dish ${index} must have a quantity that is an integer greater than 0`,
-      });
-    }
-  }
-
-  foundOrder.deliverTo = order.deliverTo;
-  foundOrder.mobileNumber = order.mobileNumber;
-  foundOrder.status = status; // Update the status
-  foundOrder.dishes = order.dishes;
+  foundOrder.status = status;
 
   res.json({ data: foundOrder });
 }
 
 
+
 function destroy(req, res, next) {
-  const { orderId } = req.params;
-  const foundIndex = orders.findIndex((order) => order.id === orderId);
+  const foundOrder = res.locals.foundOrder;
 
-  if (foundIndex === -1) {
-    return next({
-      status: 404,
-      message: `Order with id ${orderId} not found.`,
-    });
-  }
-
-  if (orders[foundIndex].status !== "pending") {
+  if (foundOrder.status !== "pending") {
     return next({
       status: 400,
       message: "An order cannot be deleted unless it is pending.",
     });
   }
 
+  const foundIndex = orders.findIndex((order) => order.id === foundOrder.id);
   orders.splice(foundIndex, 1);
+
   res.sendStatus(204);
 }
 
 module.exports = {
   list,
-  create,
-  read,
-  update,
-  destroy,
+  create: [validateOrder, create],
+  read: [findOrderById, read],
+  update: [findOrderById, validateOrder, update],
+  destroy: [findOrderById, destroy],
 };
